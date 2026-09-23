@@ -1,0 +1,7 @@
+/bin/
+/harbourd
+/harbour
+/harbour-data/
+*.test
+*.out
+.env

@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: harbour
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 20
+  harbourd:
+    build: .
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      HARBOUR_DATABASE_URL: postgres://postgres:postgres@postgres:5432/harbour?sslmode=disable
+      # LEDGER_URL: http://ledger:8410
+      # HARBOUR_TOKEN: change-me
+    volumes: ["harbour-data:/data"]
+    ports: ["8450:8450"]
+volumes:
+  harbour-data: {}
