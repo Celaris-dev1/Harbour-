@@ -176,6 +176,22 @@ func (w *Worker) step(ctx context.Context, l store.Lease, g *store.Goal, agent r
 		_, err := w.Store.TransitionFenced(ctx, l, fsm.Verifying, "agent finished")
 		return false, err
 	}
+	if act.RequiresApproval {
+		// Provenance policy: content the agent flagged as untrusted-derived
+		// cannot directly trigger an effect. Record the would-be call as an
+		// effect pinned to this step (so it is not re-asked of the agent on
+		// resume) but never invoke the tool; go straight to needs_review.
+		why := act.ApprovalReason
+		if why == "" {
+			why = "action derived from untrusted-sourced content"
+		}
+		eff, err := w.Store.RequestApproval(ctx, l, g.Cursor, act.Tool, act.Args, why)
+		if err != nil {
+			return false, err
+		}
+		_, err = w.Store.TransitionFenced(ctx, l, fsm.Paused, fmt.Sprintf("needs_review: effect %d (step %d, %s): %s", eff.ID, eff.Step, eff.Tool, why))
+		return true, err
+	}
 	e, err := w.Exec.Run(ctx, l, g.Cursor, act.Tool, act.Args, executor.Auth{Token: g.WarrantToken, SVID: g.WarrantSVID})
 	switch {
 	case err == nil:

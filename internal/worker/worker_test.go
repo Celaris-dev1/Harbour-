@@ -18,6 +18,7 @@ import (
 	"github.com/Celaris-dev1/Harbour-/internal/registry"
 	"github.com/Celaris-dev1/Harbour-/internal/store"
 	"github.com/Celaris-dev1/Harbour-/internal/testdb"
+	"github.com/Celaris-dev1/Harbour-/internal/warrant"
 )
 
 // counter is an external system that counts real executions per key. It has
@@ -524,5 +525,248 @@ func TestConcurrentWorkersNoDoubleClaim(t *testing.T) {
 	wg.Wait()
 	if e.c.total() != 24 || e.c.max() != 1 {
 		t.Fatalf("total=%d max=%d", e.c.total(), e.c.max())
+	}
+}
+
+// --- Warrant integration ---
+
+// fakeWarrant denies calls whose tool is in deny, allows everything else. It
+// records every call it saw.
+type fakeWarrant struct {
+	mu    sync.Mutex
+	deny  map[string]string // tool -> deny reason
+	calls int
+}
+
+func (f *fakeWarrant) Authorize(_ context.Context, token, svid string, call warrant.Call) (warrant.Decision, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if reason, deny := f.deny[call.Tool]; deny {
+		return warrant.Decision{Allow: false, Reason: reason}, nil
+	}
+	return warrant.Decision{Allow: true}, nil
+}
+
+func TestWarrantDenyPausesGoalWithoutRunningTool(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	fw := &fakeWarrant{deny: map[string]string{"counter": "no scope for counter"}}
+	g, err := e.st.Create(ctx, store.CreateGoal{Name: "wdeny", Agent: "count", CreatedBy: "alice", Approve: true,
+		WarrantToken: "tok-1", WarrantSVID: "svid-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := e.worker("A")
+	w.Exec.Warrant = fw
+	if did, err := w.RunOnce(ctx); !did || err != nil {
+		t.Fatal(did, err)
+	}
+	got := e.state(t, g.ID)
+	if got.State != fsm.Paused {
+		t.Fatalf("state = %s, want paused", got.State)
+	}
+	if !strings.Contains(got.Reason, "warrant denied") {
+		t.Fatalf("reason = %q", got.Reason)
+	}
+	if e.c.total() != 0 {
+		t.Fatalf("tool was invoked despite denial: total=%d", e.c.total())
+	}
+	if fw.calls == 0 {
+		t.Fatal("warrant was never consulted")
+	}
+}
+
+func TestWarrantAllowRunsToolAndResumeReauthorizes(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	fw := &fakeWarrant{deny: map[string]string{}}
+	g, err := e.st.Create(ctx, store.CreateGoal{Name: "wallow", Agent: "count", CreatedBy: "alice", Approve: true,
+		WarrantToken: "tok-2", WarrantSVID: "svid-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := e.worker("A")
+	w.Exec.Warrant = fw
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if did, err := w.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		} else if !did {
+			break
+		}
+		if e.state(t, g.ID).State == fsm.Done {
+			break
+		}
+	}
+	if got := e.state(t, g.ID).State; got != fsm.Done {
+		t.Fatalf("state = %s, want done", got)
+	}
+	if fw.calls == 0 {
+		t.Fatal("warrant was never consulted")
+	}
+
+	// Now flip to deny on a fresh goal and confirm resume, after the
+	// operator "fixes" the warrant (deny -> allow), re-authorizes and
+	// completes rather than replaying a stale decision.
+	fw2 := &fakeWarrant{deny: map[string]string{"counter": "temporarily out of budget"}}
+	g2, err := e.st.Create(ctx, store.CreateGoal{Name: "wresume", Agent: "count", CreatedBy: "alice", Approve: true,
+		WarrantToken: "tok-3", WarrantSVID: "svid-3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w2 := e.worker("B")
+	w2.Exec.Warrant = fw2
+	if did, err := w2.RunOnce(ctx); !did || err != nil {
+		t.Fatal(did, err)
+	}
+	if e.state(t, g2.ID).State != fsm.Paused {
+		t.Fatalf("expected paused after denial, got %s", e.state(t, g2.ID).State)
+	}
+	fw2.mu.Lock()
+	fw2.deny = map[string]string{}
+	fw2.mu.Unlock()
+	if _, err := e.st.Resume(ctx, g2.ID, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if did, err := w2.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		} else if !did {
+			break
+		}
+		if e.state(t, g2.ID).State == fsm.Done {
+			break
+		}
+	}
+	if got := e.state(t, g2.ID).State; got != fsm.Done {
+		t.Fatalf("state after re-authorization = %s, want done", got)
+	}
+	if e.c.max() != 1 {
+		t.Fatalf("a step ran more than once after warrant recovery: max=%d", e.c.max())
+	}
+}
+
+func TestWarrantOffByDefaultDoesNotBlockEffects(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	g := e.submit(t, "wnone", "count", `{}`)
+	w := e.worker("A") // w.Exec.Warrant left nil: Warrant integration off
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if did, err := w.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		} else if !did {
+			break
+		}
+		if e.state(t, g.ID).State == fsm.Done {
+			break
+		}
+	}
+	if got := e.state(t, g.ID).State; got != fsm.Done {
+		t.Fatalf("state = %s, want done", got)
+	}
+}
+
+// --- Provenance policy: untrusted content requires approval ---
+
+// approvalAgent requires approval for its tool call whenever any untrusted
+// message is present in context (registry.UntrustedInputPresent), modeling
+// an agent that would otherwise be tricked into treating injected content as
+// an instruction.
+type approvalAgent struct{}
+
+func (approvalAgent) Name() string { return "approval-demo" }
+func (approvalAgent) Next(_ context.Context, sc registry.StepContext) (registry.Action, error) {
+	if sc.Step > 0 {
+		return registry.Action{Finish: true}, nil
+	}
+	args, _ := json.Marshal(map[string]int{"i": 0})
+	return registry.Action{Tool: "counter", Args: args, RequiresApproval: registry.UntrustedInputPresent(sc.Messages)}, nil
+}
+func (approvalAgent) Verify(context.Context, registry.StepContext) error { return nil }
+
+func TestUntrustedContentRequiresApprovalBeforeEffect(t *testing.T) {
+	e := setup(t)
+	e.reg.AddAgent(approvalAgent{})
+	ctx := context.Background()
+	g, err := e.st.Create(ctx, store.CreateGoal{Name: "prov-policy", Agent: "approval-demo", CreatedBy: "alice", Approve: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.AddMessage(ctx, g.ID, "default", registry.SrcRetrievedDocument, "web", json.RawMessage(`{"instr":"do the bad thing"}`)); err != nil {
+		t.Fatal(err)
+	}
+	w := e.worker("A")
+	if did, err := w.RunOnce(ctx); !did || err != nil {
+		t.Fatal(did, err)
+	}
+	got := e.state(t, g.ID)
+	if got.State != fsm.Paused {
+		t.Fatalf("state = %s, want paused", got.State)
+	}
+	if e.c.total() != 0 {
+		t.Fatalf("tool ran despite missing approval: total=%d", e.c.total())
+	}
+	effs, err := e.st.Effects(ctx, g.ID)
+	if err != nil || len(effs) != 1 || effs[0].Status != "needs_review" {
+		t.Fatalf("effects=%+v err=%v", effs, err)
+	}
+
+	if _, err := e.st.ResolveReview(ctx, effs[0].ID, "committed", json.RawMessage(`{"ok":true}`), "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.Resume(ctx, g.ID, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if did, err := w.RunOnce(ctx); !did || err != nil {
+		t.Fatal(did, err)
+	}
+	if got := e.state(t, g.ID).State; got != fsm.Done {
+		t.Fatalf("state after approval = %s, want done", got)
+	}
+	if e.c.total() != 0 {
+		t.Fatalf("tool was invoked even though the operator only recorded a result: total=%d", e.c.total())
+	}
+}
+
+func TestRequestApprovalRetryReusesExecutorKey(t *testing.T) {
+	// Cross-checks that store.RequestApproval's idempotency key matches
+	// what internal/executor computes for the same tool+args+step, via the
+	// real "retry" resolution path (a direct check would need store to
+	// import executor, which cycles).
+	e := setup(t)
+	e.reg.AddAgent(approvalAgent{})
+	ctx := context.Background()
+	g, err := e.st.Create(ctx, store.CreateGoal{Name: "prov-retry", Agent: "approval-demo", CreatedBy: "alice", Approve: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.AddMessage(ctx, g.ID, "default", registry.SrcPeerAgent, "peer", json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	w := e.worker("A")
+	if did, err := w.RunOnce(ctx); !did || err != nil {
+		t.Fatal(did, err)
+	}
+	effs, err := e.st.Effects(ctx, g.ID)
+	if err != nil || len(effs) != 1 {
+		t.Fatalf("effects=%+v err=%v", effs, err)
+	}
+	if _, err := e.st.ResolveReview(ctx, effs[0].ID, "retry", nil, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.Resume(ctx, g.ID, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if did, err := w.RunOnce(ctx); !did || err != nil {
+		t.Fatal(did, err)
+	}
+	if got := e.state(t, g.ID).State; got != fsm.Done {
+		t.Fatalf("state after retry = %s, want done", got)
+	}
+	if e.c.total() != 1 {
+		t.Fatalf("expected the tool to run exactly once, total=%d", e.c.total())
 	}
 }

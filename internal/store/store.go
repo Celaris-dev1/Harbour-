@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"time"
 
 	"github.com/Celaris-dev1/Harbour-/internal/fsm"
@@ -648,6 +650,89 @@ func (s *Store) ResolveReview(ctx context.Context, id int64, action string, resu
 		s.record(ctx, g, "", "harbour.effect.result", map[string]any{"effect_id": e.ID, "step": e.Step, "tool": e.Tool, "idem_key": e.Key, "status": status, "via": "operator:" + actor})
 	}
 	return e, nil
+}
+
+// RequestApproval records a would-be tool call directly as needs_review,
+// without ever invoking the tool: used by the provenance policy for actions
+// derived from untrusted-sourced content. It uses the same idempotency-key
+// scheme as the executor (sha256(tool \n canonical(args) \n goal:step)), so
+// if an operator resolves it with "retry" the executor's normal recovery
+// path picks up the identical key and runs the tool exactly once.
+func (s *Store) RequestApproval(ctx context.Context, l Lease, step int, tool string, args json.RawMessage, why string) (*Effect, error) {
+	canon, err := canonicalJSON(args)
+	if err != nil {
+		return nil, fmt.Errorf("args: %w", err)
+	}
+	key := idemKey(tool, canon, l.GoalID, step)
+	e, created, err := s.CommitIntent(ctx, l, key, step, tool, canon)
+	if err != nil {
+		return nil, err
+	}
+	if !created {
+		return e, nil // already recorded (resume replay): don't re-flag
+	}
+	if err := s.MarkNeedsReview(ctx, e.ID, why); err != nil {
+		return nil, err
+	}
+	return s.EffectByID(ctx, e.ID)
+}
+
+// canonicalJSON and idemKey mirror internal/executor's Canonical/Key exactly
+// (kept in sync by TestRequestApprovalKeyMatchesExecutor), duplicated here
+// rather than imported to avoid a store<->executor import cycle (executor
+// already imports store).
+func canonicalJSON(raw json.RawMessage) ([]byte, error) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return []byte("null"), nil
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	var v any
+	if err := d.Decode(&v); err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	writeCanonJSON(&buf, v)
+	return buf.Bytes(), nil
+}
+
+func writeCanonJSON(b *bytes.Buffer, v any) {
+	switch x := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		b.WriteByte('{')
+		for i, k := range keys {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			kb, _ := json.Marshal(k)
+			b.Write(kb)
+			b.WriteByte(':')
+			writeCanonJSON(b, x[k])
+		}
+		b.WriteByte('}')
+	case []any:
+		b.WriteByte('[')
+		for i, e := range x {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			writeCanonJSON(b, e)
+		}
+		b.WriteByte(']')
+	default:
+		eb, _ := json.Marshal(x)
+		b.Write(eb)
+	}
+}
+
+func idemKey(tool string, canon []byte, goalID string, step int) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s\n%s\n%s:%d", tool, canon, goalID, step)))
+	return hex.EncodeToString(h[:])
 }
 
 // MarkNeedsReview flags an in-doubt effect that cannot be probed.
