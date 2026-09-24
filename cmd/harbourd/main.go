@@ -32,6 +32,13 @@ func env(k, d string) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "keys" {
+		if err := cmdKeys(os.Args[2:]); err != nil {
+			slog.Error("keys", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	addr := flag.String("addr", env("HARBOUR_ADDR", ":8450"), "listen address")
 	dbURL := flag.String("db", env("HARBOUR_DATABASE_URL", "postgres://postgres:postgres@localhost:5432/harbour"), "postgres url")
 	workers := flag.Int("workers", 2, "worker goroutines (0 = API only)")

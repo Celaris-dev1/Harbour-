@@ -4,21 +4,17 @@ package store
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"reflect"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/Celaris-dev1/Harbour-/internal/fsm"
@@ -273,27 +269,15 @@ func (s *Store) record(ctx context.Context, g *Goal, worker, typ string, payload
 	_ = s.Ledger.Record(ctx, ledger.Record{Chain: "harbour", Type: typ, GoalID: g.ID, ActorChain: actors, Payload: payload})
 }
 
-// receiptSigner lazily loads (or generates) the Ed25519 key Harbour signs stack-receipt/v1
-// effect receipts with. HARBOUR_RECEIPT_KEY is a base64 32-byte seed; unset generates an
-// ephemeral per-process key.
-var (
-	receiptSignerOnce sync.Once
-	receiptSignerKey  receipt.Ed25519Signer
-)
-
+// receiptSigner returns the process-wide Ed25519 key Harbour signs stack-receipt/v1 effect
+// receipts with: HARBOUR_RECEIPT_KEY (base64 32-byte seed) or a key persisted at
+// HARBOUR_RECEIPT_KEY_FILE / <user config dir>/harbour/receipt.key, falling back to an
+// ephemeral per-process key with a logged warning. See receipt.DefaultSigner.
 func receiptSigner() receipt.Ed25519Signer {
-	receiptSignerOnce.Do(func() {
-		if seed := os.Getenv("HARBOUR_RECEIPT_KEY"); seed != "" {
-			if b, err := base64.StdEncoding.DecodeString(seed); err == nil && len(b) == ed25519.SeedSize {
-				receiptSignerKey = receipt.Ed25519Signer{Key: ed25519.NewKeyFromSeed(b)}
-				return
-			}
-			log.Print("HARBOUR_RECEIPT_KEY: invalid, ignoring (want base64 32-byte seed)")
-		}
-		_, priv, _ := ed25519.GenerateKey(rand.Reader)
-		receiptSignerKey = receipt.Ed25519Signer{Key: priv}
-	})
-	return receiptSignerKey
+	// DefaultSigner only errors on a broken CSPRNG (crypto/rand.Read failing), which
+	// nothing here can recover from either; fall through to a zero-value signer.
+	s, _ := receipt.DefaultSigner()
+	return s
 }
 
 // attachReceipt signs a stack-receipt/v1 envelope over an effect's result payload and sets
