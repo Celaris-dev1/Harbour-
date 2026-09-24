@@ -13,6 +13,13 @@ import (
 	"github.com/Celaris-dev1/Harbour-/internal/store"
 )
 
+// MaxRequestBody bounds every request body this API reads (except the SSE
+// attach stream, which has no body). It is deliberately generous for
+// message/goal payloads but rules out an unbounded-body DoS; a request over
+// the limit fails json.Decode with an error that maps to 400/413 rather than
+// exhausting memory.
+const MaxRequestBody = 1 << 20 // 1 MiB
+
 type Server struct {
 	Store *store.Store
 	Token string
@@ -31,9 +38,25 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /v1/goals/{id}/events", s.events)
 	m.HandleFunc("GET /v1/goals/{id}/attach", s.attach)
 	m.HandleFunc("POST /v1/effects/{id}/resolve", s.resolve)
-	return s.auth(m)
+	return s.limitBody(s.auth(m))
 }
 
+// limitBody caps every request body at MaxRequestBody before any handler
+// (including auth, which reads no body, but this must wrap outermost so it
+// applies uniformly regardless of handler order) sees it.
+func (s *Server) limitBody(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBody)
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// auth requires a bearer token on every route except /healthz when a token
+// is configured. Every route registered in Handler goes through this
+// (Handler wraps the whole mux, not individual handlers), so there is no
+// route that can be added later and accidentally skip it.
 func (s *Server) auth(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.Token != "" && r.URL.Path != "/healthz" && r.Header.Get("Authorization") != "Bearer "+s.Token {
@@ -56,6 +79,8 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 		code = 409
 	} else if errors.Is(err, store.ErrNotFound) {
 		code = 404
+	} else if errors.Is(err, store.ErrConflict) {
+		code = 409
 	}
 	writeJSON(w, code, map[string]string{"error": err.Error()})
 }

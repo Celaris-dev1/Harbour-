@@ -154,9 +154,46 @@ func (w Writer) Verify(_ context.Context, sc registry.StepContext) error {
 	return nil
 }
 
-// Register adds the demo tools and agent.
+// Echoer calls the probe-less Echo tool N times (input: {"n":2}). It exists
+// to exercise the needs_review path end to end (a crash mid-effect on a
+// tool with no Prober must pause the goal for an operator, not silently
+// retry) with a plain built-in tool, e.g. from scripts/e2e.sh.
+type Echoer struct{}
+
+func (Echoer) Name() string { return "demo.echoer" }
+
+type echoerInput struct {
+	N int `json:"n"`
+}
+
+func (Echoer) n(sc registry.StepContext) int {
+	var in echoerInput
+	json.Unmarshal(sc.Input, &in)
+	if in.N <= 0 {
+		in.N = 1
+	}
+	return in.N
+}
+
+func (e Echoer) Next(_ context.Context, sc registry.StepContext) (registry.Action, error) {
+	if sc.Step >= e.n(sc) {
+		return registry.Action{Finish: true}, nil
+	}
+	args, _ := json.Marshal(map[string]int{"i": sc.Step})
+	return registry.Action{Tool: "echo", Args: args}, nil
+}
+
+func (e Echoer) Verify(_ context.Context, sc registry.StepContext) error {
+	if len(sc.History) < e.n(sc) {
+		return fmt.Errorf("only %d of %d steps committed", len(sc.History), e.n(sc))
+	}
+	return nil
+}
+
+// Register adds the demo tools and agents.
 func Register(r *registry.Registry, dir string) {
 	r.AddTool(Echo{})
 	r.AddTool(&FileAppend{Dir: dir})
 	r.AddAgent(Writer{})
+	r.AddAgent(Echoer{})
 }

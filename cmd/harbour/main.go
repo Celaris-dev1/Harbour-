@@ -16,7 +16,7 @@ import (
 
 const usage = `harbour — CLI for harbourd (HARBOUR_URL, HARBOUR_TOKEN)
 
-  harbour submit -name N -agent A [-input JSON] [-parent ID] [-approve]
+  harbour submit -name N -agent A [-id ID] [-input JSON] [-parent ID] [-approve] [-warrant-token T] [-warrant-svid S]
   harbour list
   harbour get <id|name>
   harbour attach <id|name>          stream live state (SSE)
@@ -115,13 +115,16 @@ func main() {
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	switch cmd {
 	case "submit":
+		id := fs.String("id", "", "caller-supplied goal id (idempotent resubmit)")
 		name := fs.String("name", "", "goal name (unique)")
 		agent := fs.String("agent", "demo.writer", "agent")
 		input := fs.String("input", "{}", "input JSON")
 		parent := fs.String("parent", "", "parent goal id")
 		approve := fs.Bool("approve", false, "approve immediately")
+		wtoken := fs.String("warrant-token", envOr("HARBOUR_WARRANT_TOKEN", ""), "Warrant capability token for this goal's effects")
+		wsvid := fs.String("warrant-svid", envOr("HARBOUR_WARRANT_SVID", ""), "Warrant workload SVID for this goal's effects")
 		parse(fs, args)
-		call("POST", "/v1/goals", map[string]any{"name": *name, "agent": *agent, "input": json.RawMessage(*input), "parent_id": *parent, "created_by": me(), "approve": *approve})
+		call("POST", "/v1/goals", map[string]any{"id": *id, "name": *name, "agent": *agent, "input": json.RawMessage(*input), "parent_id": *parent, "created_by": me(), "approve": *approve, "warrant_token": *wtoken, "warrant_svid": *wsvid})
 	case "list":
 		call("GET", "/v1/goals", nil)
 	case "get":

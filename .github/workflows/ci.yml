@@ -14,12 +14,31 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-retries 20
-    env:
-      HARBOUR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/harbour?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: "1.24" }
+        with: { go-version: "1.25" }
       - run: go build ./...
+      - run: go build -tags temporal ./...
       - run: go vet ./...
-      - run: go test -race ./...
+
+      - name: test (with Postgres)
+        run: go test -race -count=1 ./...
+        env:
+          HARBOUR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/harbour?sslmode=disable
+
+      - name: test (without Postgres — DB tests must skip cleanly)
+        run: go test -race -count=1 ./...
+
+      - name: fuzz smoke (regression corpus + a short budget on each target)
+        run: |
+          set -e
+          go test ./internal/fsm/... -run '^$' -fuzz FuzzCheck -fuzztime 20s
+          go test ./internal/executor/... -run '^$' -fuzz FuzzCanonical -fuzztime 20s
+          go test ./internal/executor/... -run '^$' -fuzz FuzzKey -fuzztime 20s
+          go test ./internal/api/... -run '^$' -fuzz FuzzRequestParsing -fuzztime 20s
+        env:
+          HARBOUR_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/harbour?sslmode=disable
+
+      - name: e2e
+        run: bash scripts/e2e.sh

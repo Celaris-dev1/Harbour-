@@ -19,6 +19,7 @@ import (
 	"github.com/Celaris-dev1/Harbour-/internal/ledger"
 	"github.com/Celaris-dev1/Harbour-/internal/registry"
 	"github.com/Celaris-dev1/Harbour-/internal/store"
+	"github.com/Celaris-dev1/Harbour-/internal/warrant"
 	"github.com/Celaris-dev1/Harbour-/internal/worker"
 )
 
@@ -40,7 +41,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	st, err := store.Open(ctx, *dbURL, ledger.FromEnv())
+	st, err := store.Open(ctx, *dbURL, ledger.FromEnv(ctx))
 	if err != nil {
 		slog.Error("open store", "err", err)
 		os.Exit(1)
@@ -48,11 +49,16 @@ func main() {
 	defer st.Close()
 	reg := registry.New()
 	demo.Register(reg, *dir)
+	wclient := warrant.FromEnv()
+	if wclient != nil {
+		slog.Info("warrant integration enabled", "url", os.Getenv("WARRANT_URL"))
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < *workers; i++ {
 		w := worker.New(fmt.Sprintf("%s-%d-%d", *node, os.Getpid(), i), st, reg)
 		w.LeaseTTL = *ttl
+		w.Exec.Warrant = wclient
 		installCrashHook(w)
 		wg.Add(1)
 		go func() { defer wg.Done(); w.Loop(ctx) }()

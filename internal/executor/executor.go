@@ -19,10 +19,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 
 	"github.com/Celaris-dev1/Harbour-/internal/registry"
 	"github.com/Celaris-dev1/Harbour-/internal/store"
+	"github.com/Celaris-dev1/Harbour-/internal/warrant"
 )
 
 var (
@@ -31,9 +33,20 @@ var (
 	// ErrSimulatedCrash, returned from a Hook, makes the worker abandon the
 	// goal exactly as a dead process would: no result row, no lease release.
 	ErrSimulatedCrash = errors.New("simulated crash")
+	// ErrWarrantDenied means Warrant refused to authorize this effect. The
+	// effect row is left untouched (still 'intent', attempts unchanged if
+	// this happened before the attempt was recorded) so a resume safely
+	// re-authorizes rather than replaying a stale denial.
+	ErrWarrantDenied = errors.New("warrant denied")
 )
 
 // Canonical returns canonical JSON: object keys sorted, no whitespace.
+//
+// It rejects trailing data after the one JSON value (e.g. `{"a":1}xyz` or
+// `{"a":1}{"a":2}`): json.Decoder.Decode alone only reads the first value
+// and silently ignores anything after it, which would let two different
+// byte strings collapse to the same canonical output and therefore the same
+// idempotency key.
 func Canonical(raw json.RawMessage) ([]byte, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return []byte("null"), nil
@@ -43,6 +56,13 @@ func Canonical(raw json.RawMessage) ([]byte, error) {
 	var v any
 	if err := d.Decode(&v); err != nil {
 		return nil, err
+	}
+	var trailer json.RawMessage
+	if err := d.Decode(&trailer); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("trailing JSON value after the first")
+		}
+		return nil, fmt.Errorf("trailing data after JSON value: %w", err)
 	}
 	var buf bytes.Buffer
 	writeCanon(&buf, v)
@@ -101,13 +121,24 @@ type Hooks struct {
 }
 
 type Executor struct {
-	Store *store.Store
-	Reg   *registry.Registry
-	Hooks Hooks
+	Store   *store.Store
+	Reg     *registry.Registry
+	Hooks   Hooks
+	// Warrant, when non-nil, is consulted before every tool invocation
+	// (fresh, retried, or recovered after a crash). A deny returns
+	// ErrWarrantDenied without ever calling the tool.
+	Warrant warrant.Client
+}
+
+// Auth carries the Warrant credentials to authorize a step's effect with,
+// normally the goal's WarrantToken/WarrantSVID.
+type Auth struct {
+	Token string
+	SVID  string
 }
 
 // Run executes one step's tool call exactly once (effectively).
-func (x *Executor) Run(ctx context.Context, l store.Lease, step int, tool string, args json.RawMessage) (*store.Effect, error) {
+func (x *Executor) Run(ctx context.Context, l store.Lease, step int, tool string, args json.RawMessage, auth Auth) (*store.Effect, error) {
 	t, err := x.Reg.Tool(tool)
 	if err != nil {
 		return nil, err
@@ -124,18 +155,18 @@ func (x *Executor) Run(ctx context.Context, l store.Lease, step int, tool string
 		if e.Key != key {
 			return nil, fmt.Errorf("step %d already bound to a different call (key %s)", step, e.Key)
 		}
-		return x.settle(ctx, t, e)
+		return x.settle(ctx, t, e, auth)
 	}
 	if x.Hooks.AfterIntent != nil {
 		if err := x.Hooks.AfterIntent(e); err != nil {
 			return nil, err
 		}
 	}
-	return x.execute(ctx, t, e, "execute")
+	return x.execute(ctx, t, e, "execute", auth)
 }
 
 // settle handles an effect row that already existed.
-func (x *Executor) settle(ctx context.Context, t registry.Tool, e *store.Effect) (*store.Effect, error) {
+func (x *Executor) settle(ctx context.Context, t registry.Tool, e *store.Effect, auth Auth) (*store.Effect, error) {
 	switch e.Status {
 	case "committed":
 		return e, nil // idempotent replay: stored result, no re-run
@@ -144,14 +175,14 @@ func (x *Executor) settle(ctx context.Context, t registry.Tool, e *store.Effect)
 	case "needs_review":
 		return e, ErrNeedsReview
 	}
-	return x.Reconcile(ctx, t, e)
+	return x.Reconcile(ctx, t, e, auth)
 }
 
 // Reconcile resolves an in-doubt (intent) effect after a crash.
-func (x *Executor) Reconcile(ctx context.Context, t registry.Tool, e *store.Effect) (*store.Effect, error) {
+func (x *Executor) Reconcile(ctx context.Context, t registry.Tool, e *store.Effect, auth Auth) (*store.Effect, error) {
 	if e.Attempts == 0 {
 		// Intent committed but the tool was never invoked: safe to run.
-		return x.execute(ctx, t, e, "execute-after-recovery")
+		return x.execute(ctx, t, e, "execute-after-recovery", auth)
 	}
 	p, ok := t.(registry.Prober)
 	if !ok {
@@ -174,10 +205,38 @@ func (x *Executor) Reconcile(ctx context.Context, t registry.Tool, e *store.Effe
 		}
 		return x.settleFinal(ne)
 	}
-	return x.execute(ctx, t, e, "retry-after-probe")
+	return x.execute(ctx, t, e, "retry-after-probe", auth)
 }
 
-func (x *Executor) execute(ctx context.Context, t registry.Tool, e *store.Effect, via string) (*store.Effect, error) {
+// authorize consults Warrant, if configured, before a tool is ever invoked.
+func (x *Executor) authorize(ctx context.Context, e *store.Effect, auth Auth) error {
+	if x.Warrant == nil {
+		return nil
+	}
+	var argMap map[string]any
+	if len(e.Args) > 0 {
+		if err := json.Unmarshal(e.Args, &argMap); err != nil {
+			argMap = map[string]any{"_raw": string(e.Args)}
+		}
+	}
+	d, err := x.Warrant.Authorize(ctx, auth.Token, auth.SVID, warrant.Call{Tool: e.Tool, Args: argMap})
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrWarrantDenied, err)
+	}
+	if !d.Allow {
+		reason := d.Reason
+		if reason == "" {
+			reason = "denied"
+		}
+		return fmt.Errorf("%w: %s", ErrWarrantDenied, reason)
+	}
+	return nil
+}
+
+func (x *Executor) execute(ctx context.Context, t registry.Tool, e *store.Effect, via string, auth Auth) (*store.Effect, error) {
+	if err := x.authorize(ctx, e, auth); err != nil {
+		return e, err
+	}
 	// Record the attempt *before* invoking the tool: attempts>0 means "the
 	// effect may have happened", which is what recovery keys off.
 	if err := x.Store.MarkAttempt(ctx, e.ID); err != nil {
