@@ -7,6 +7,22 @@ two-phase commit around every side effect so a retried action is never double-ex
 (The product spec calls it "Harbor". This is a ground-up build against that design;
 it does not reuse Prosper's `AutonomousRunner`.)
 
+## Setup
+
+Requirements: Go 1.24+ and Postgres 16 (or Docker to run it).
+
+```sh
+scripts/setup.sh            # check prerequisites, build, create the database on local Postgres, write .env
+scripts/setup.sh --docker   # same, but start Postgres with docker compose
+scripts/setup.sh --no-db    # build only
+set -a; . ./.env; set +a    # load the generated config into your shell
+```
+
+The script builds `bin/harbour` and `bin/harbourd`, creates the `harbour` database if Postgres is reachable
+(override the admin connection with `PG_ADMIN_URL`), and writes a `.env` (mode 0600, gitignored)
+with freshly generated tokens and keys. It is safe to re-run: an existing `.env` or database
+is never overwritten. It finishes by printing the commands to start Harbour.
+
 ## Quickstart
 
 ```sh
@@ -176,3 +192,8 @@ Not yet built (from the spec's "fully built version"):
 - LISTEN/NOTIFY for attach (it polls every 300ms today).
 - A real `temporal`-tagged Engine (see `internal/engine/temporal.go` for why, and
   what shape it needs).
+
+## License
+
+Apache License 2.0; see [LICENSE](LICENSE). Self-hosted: you run Harbour on your own
+infrastructure. No hosted service is required and none is contacted.
