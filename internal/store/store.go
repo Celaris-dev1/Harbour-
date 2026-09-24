@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"sort"
 	"time"
@@ -690,6 +691,16 @@ func canonicalJSON(raw json.RawMessage) ([]byte, error) {
 	var v any
 	if err := d.Decode(&v); err != nil {
 		return nil, err
+	}
+	// Reject trailing data after the one JSON value; see the identical
+	// comment on executor.Canonical, which this must stay byte-for-byte
+	// equivalent to.
+	var trailer json.RawMessage
+	if err := d.Decode(&trailer); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("trailing JSON value after the first")
+		}
+		return nil, fmt.Errorf("trailing data after JSON value: %w", err)
 	}
 	var buf bytes.Buffer
 	writeCanonJSON(&buf, v)

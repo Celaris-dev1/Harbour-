@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 
 	"github.com/Celaris-dev1/Harbour-/internal/registry"
@@ -40,6 +41,12 @@ var (
 )
 
 // Canonical returns canonical JSON: object keys sorted, no whitespace.
+//
+// It rejects trailing data after the one JSON value (e.g. `{"a":1}xyz` or
+// `{"a":1}{"a":2}`): json.Decoder.Decode alone only reads the first value
+// and silently ignores anything after it, which would let two different
+// byte strings collapse to the same canonical output and therefore the same
+// idempotency key.
 func Canonical(raw json.RawMessage) ([]byte, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return []byte("null"), nil
@@ -49,6 +56,13 @@ func Canonical(raw json.RawMessage) ([]byte, error) {
 	var v any
 	if err := d.Decode(&v); err != nil {
 		return nil, err
+	}
+	var trailer json.RawMessage
+	if err := d.Decode(&trailer); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("trailing JSON value after the first")
+		}
+		return nil, fmt.Errorf("trailing data after JSON value: %w", err)
 	}
 	var buf bytes.Buffer
 	writeCanon(&buf, v)
