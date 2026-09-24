@@ -333,12 +333,12 @@ func TestIdempotentReplayReturnsStoredResult(t *testing.T) {
 	claimed, _ := e.st.Claim(ctx, "w", time.Minute)
 	l := store.Lease{GoalID: g.ID, Worker: "w", Epoch: claimed.LeaseEpoch}
 	x := &executor.Executor{Store: e.st, Reg: e.reg}
-	r1, err := x.Run(ctx, l, 0, "counter", json.RawMessage(`{"b":1,"a":[1,2]}`))
+	r1, err := x.Run(ctx, l, 0, "counter", json.RawMessage(`{"b":1,"a":[1,2]}`), executor.Auth{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Same call, different key order / whitespace: same canonical key.
-	r2, err := x.Run(ctx, l, 0, "counter", json.RawMessage(`{ "a":[1,2], "b":1 }`))
+	r2, err := x.Run(ctx, l, 0, "counter", json.RawMessage(`{ "a":[1,2], "b":1 }`), executor.Auth{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func TestIdempotentReplayReturnsStoredResult(t *testing.T) {
 		t.Fatalf("re-ran: %d %d count=%d", r1.ID, r2.ID, e.c.total())
 	}
 	// Different args at the same step are rejected, not silently executed.
-	if _, err := x.Run(ctx, l, 0, "counter", json.RawMessage(`{"a":2}`)); err == nil {
+	if _, err := x.Run(ctx, l, 0, "counter", json.RawMessage(`{"a":2}`), executor.Auth{}); err == nil {
 		t.Fatal("expected conflict")
 	}
 }
@@ -363,7 +363,7 @@ func TestStaleLeaseIsFenced(t *testing.T) {
 		t.Fatal("B should claim with higher epoch")
 	}
 	x := &executor.Executor{Store: e.st, Reg: e.reg}
-	if _, err := x.Run(ctx, la, 0, "counter", json.RawMessage(`{}`)); !errors.Is(err, store.ErrLeaseLost) {
+	if _, err := x.Run(ctx, la, 0, "counter", json.RawMessage(`{}`), executor.Auth{}); !errors.Is(err, store.ErrLeaseLost) {
 		t.Fatalf("stale worker wrote intent: %v", err)
 	}
 	if e.st.Heartbeat(ctx, g.ID, "A", la.Epoch, time.Minute) != store.ErrLeaseLost {

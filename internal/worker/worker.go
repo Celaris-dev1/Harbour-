@@ -176,12 +176,18 @@ func (w *Worker) step(ctx context.Context, l store.Lease, g *store.Goal, agent r
 		_, err := w.Store.TransitionFenced(ctx, l, fsm.Verifying, "agent finished")
 		return false, err
 	}
-	e, err := w.Exec.Run(ctx, l, g.Cursor, act.Tool, act.Args)
+	e, err := w.Exec.Run(ctx, l, g.Cursor, act.Tool, act.Args, executor.Auth{Token: g.WarrantToken, SVID: g.WarrantSVID})
 	switch {
 	case err == nil:
 		return false, w.Store.CommitStep(ctx, l, e)
 	case errors.Is(err, executor.ErrNeedsReview):
 		_, err2 := w.Store.TransitionFenced(ctx, l, fsm.Paused, fmt.Sprintf("needs_review: effect %d (step %d, %s)", e.ID, e.Step, e.Tool))
+		return true, err2
+	case errors.Is(err, executor.ErrWarrantDenied):
+		// The effect was never attempted: pause so an operator can grant
+		// authority (revoke/re-mint the token) and resume, which
+		// re-authorizes the same recorded tool+args from scratch.
+		_, err2 := w.Store.TransitionFenced(ctx, l, fsm.Paused, fmt.Sprintf("warrant denied: step %d (%s): %s", g.Cursor, act.Tool, err.Error()))
 		return true, err2
 	case errors.Is(err, executor.ErrToolFailed):
 		_, err2 := w.Store.TransitionFenced(ctx, l, fsm.Failed, err.Error())

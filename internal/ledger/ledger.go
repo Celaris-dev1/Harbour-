@@ -42,13 +42,25 @@ type HTTP struct {
 	Client  *http.Client
 }
 
-// FromEnv returns an HTTP recorder if LEDGER_URL is set, else Noop.
-func FromEnv() Recorder {
+// FromEnv returns a durable, spooling recorder if LEDGER_URL is set, else
+// Noop. When spooling, records are always fsync'd to a local file (under
+// LEDGER_SPOOL_DIR, default "./harbour-ledger-spool") before Record returns,
+// so a down or slow Ledger never blocks the caller or drops a write; a
+// background goroutine (started against ctx) retries delivery with backoff
+// and survives process restarts by re-scanning the spool directory.
+func FromEnv(ctx context.Context) Recorder {
 	u := os.Getenv("LEDGER_URL")
 	if u == "" {
 		return Noop{}
 	}
-	return &HTTP{BaseURL: u, Token: os.Getenv("LEDGER_TOKEN"), Client: &http.Client{Timeout: 5 * time.Second}}
+	h := &HTTP{BaseURL: u, Token: os.Getenv("LEDGER_TOKEN"), Client: &http.Client{Timeout: 5 * time.Second}}
+	dir := os.Getenv("LEDGER_SPOOL_DIR")
+	if dir == "" {
+		dir = "./harbour-ledger-spool"
+	}
+	sp := NewSpool(dir, h)
+	sp.Start(ctx)
+	return sp
 }
 
 func (h *HTTP) Record(ctx context.Context, r Record) error {

@@ -2,6 +2,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	_ "embed"
@@ -9,12 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/Celaris-dev1/Harbour-/internal/fsm"
 	"github.com/Celaris-dev1/Harbour-/internal/ledger"
 	"github.com/Celaris-dev1/Harbour-/internal/registry"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -24,6 +27,9 @@ var schema string
 var (
 	ErrNotFound  = errors.New("not found")
 	ErrLeaseLost = errors.New("lease lost")
+	// ErrConflict is returned when a caller-supplied goal_id already names a
+	// goal with a different spec (name/agent/input/parent).
+	ErrConflict = errors.New("goal_id conflict")
 )
 
 type Store struct {
@@ -73,16 +79,18 @@ type Goal struct {
 	LeaseEpoch   int64           `json:"lease_epoch"`
 	LeaseExpires *time.Time      `json:"lease_expires,omitempty"`
 	Reason       string          `json:"reason"`
+	WarrantToken string          `json:"-"`
+	WarrantSVID  string          `json:"-"`
 	CreatedAt    time.Time       `json:"created_at"`
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
-const goalCols = `id,name,agent,input,state,paused_from,parent_id,created_by,cursor,lease_owner,lease_epoch,lease_expires,reason,created_at,updated_at`
+const goalCols = `id,name,agent,input,state,paused_from,parent_id,created_by,cursor,lease_owner,lease_epoch,lease_expires,reason,warrant_token,warrant_svid,created_at,updated_at`
 
 func scanGoal(r pgx.Row) (*Goal, error) {
 	var g Goal
 	var st string
-	err := r.Scan(&g.ID, &g.Name, &g.Agent, &g.Input, &st, &g.PausedFrom, &g.ParentID, &g.CreatedBy, &g.Cursor, &g.LeaseOwner, &g.LeaseEpoch, &g.LeaseExpires, &g.Reason, &g.CreatedAt, &g.UpdatedAt)
+	err := r.Scan(&g.ID, &g.Name, &g.Agent, &g.Input, &st, &g.PausedFrom, &g.ParentID, &g.CreatedBy, &g.Cursor, &g.LeaseOwner, &g.LeaseEpoch, &g.LeaseExpires, &g.Reason, &g.WarrantToken, &g.WarrantSVID, &g.CreatedAt, &g.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -94,6 +102,39 @@ func newID() string {
 	b := make([]byte, 8)
 	rand.Read(b)
 	return "g_" + hex.EncodeToString(b)
+}
+
+// validGoalID reports whether a caller-supplied goal_id is an acceptable
+// external identifier: non-empty, bounded length, and a conservative charset
+// so it is always safe in URLs, logs and Ledger records.
+func validGoalID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-', r == '.', r == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// jsonEqual compares two JSON documents by value (not byte-for-byte), so
+// whitespace/key-order differences don't defeat idempotent resubmission.
+func jsonEqual(a, b json.RawMessage) bool {
+	var av, bv any
+	if len(a) == 0 {
+		a = json.RawMessage(`{}`)
+	}
+	if len(b) == 0 {
+		b = json.RawMessage(`{}`)
+	}
+	if json.Unmarshal(a, &av) != nil || json.Unmarshal(b, &bv) != nil {
+		return bytes.Equal(bytes.TrimSpace(a), bytes.TrimSpace(b))
+	}
+	return reflect.DeepEqual(av, bv)
 }
 
 // ActorChain builds the Ledger actor chain for a goal: originating human first.
@@ -116,33 +157,89 @@ func addEvent(ctx context.Context, tx pgx.Tx, goalID, kind string, data any) err
 }
 
 type CreateGoal struct {
-	Name      string          `json:"name"`
-	Agent     string          `json:"agent"`
-	Input     json.RawMessage `json:"input"`
-	ParentID  string          `json:"parent_id,omitempty"`
-	CreatedBy string          `json:"created_by"`
-	Approve   bool            `json:"approve"`
+	// ID is an optional caller-supplied external goal id. If set, submit is
+	// idempotent: resubmitting the same id with an identical spec (name,
+	// agent, input, parent_id) returns the existing goal unchanged; a
+	// resubmit with a different spec fails with ErrConflict (API: 409).
+	ID           string          `json:"id,omitempty"`
+	Name         string          `json:"name"`
+	Agent        string          `json:"agent"`
+	Input        json.RawMessage `json:"input"`
+	ParentID     string          `json:"parent_id,omitempty"`
+	CreatedBy    string          `json:"created_by"`
+	Approve      bool            `json:"approve"`
+	WarrantToken string          `json:"warrant_token,omitempty"`
+	WarrantSVID  string          `json:"warrant_svid,omitempty"`
+}
+
+// sameSpec reports whether an existing goal matches a resubmitted CreateGoal
+// closely enough to treat the resubmit as idempotent.
+func sameSpec(g *Goal, c CreateGoal) bool {
+	gotParent := ""
+	if g.ParentID != nil {
+		gotParent = *g.ParentID
+	}
+	return g.Name == c.Name && g.Agent == c.Agent && gotParent == c.ParentID && jsonEqual(g.Input, c.Input)
 }
 
 func (s *Store) Create(ctx context.Context, c CreateGoal) (*Goal, error) {
 	if c.Name == "" || c.Agent == "" || c.CreatedBy == "" {
 		return nil, fmt.Errorf("name, agent and created_by are required")
 	}
+	if c.ID != "" && !validGoalID(c.ID) {
+		return nil, fmt.Errorf("invalid goal_id %q: must be 1-128 chars of [A-Za-z0-9_.:-]", c.ID)
+	}
 	if len(c.Input) == 0 {
 		c.Input = json.RawMessage(`{}`)
+	}
+	if c.ID != "" {
+		existing, err := s.Pool.Query(ctx, `SELECT `+goalCols+` FROM goals WHERE id=$1`, c.ID)
+		if err != nil {
+			return nil, err
+		}
+		var g *Goal
+		if existing.Next() {
+			g, err = scanGoal(existing)
+		}
+		existing.Close()
+		if err != nil {
+			return nil, err
+		}
+		if g != nil {
+			if sameSpec(g, c) {
+				return g, nil
+			}
+			return nil, fmt.Errorf("%w: goal_id %q already exists with a different spec", ErrConflict, c.ID)
+		}
 	}
 	var parent *string
 	if c.ParentID != "" {
 		parent = &c.ParentID
+	}
+	id := c.ID
+	if id == "" {
+		id = newID()
 	}
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	g, err := scanGoal(tx.QueryRow(ctx, `INSERT INTO goals(id,name,agent,input,state,parent_id,created_by) VALUES($1,$2,$3,$4,'proposed',$5,$6) RETURNING `+goalCols,
-		newID(), c.Name, c.Agent, c.Input, parent, c.CreatedBy))
+	g, err := scanGoal(tx.QueryRow(ctx, `INSERT INTO goals(id,name,agent,input,state,parent_id,created_by,warrant_token,warrant_svid) VALUES($1,$2,$3,$4,'proposed',$5,$6,$7,$8) RETURNING `+goalCols,
+		id, c.Name, c.Agent, c.Input, parent, c.CreatedBy, c.WarrantToken, c.WarrantSVID))
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// Unique violation: a concurrent submit won the race on this
+			// external goal_id (or the name). Re-read and treat as the
+			// idempotent case rather than surfacing a raw DB error.
+			if c.ID != "" {
+				if g2, gerr := s.Get(ctx, c.ID); gerr == nil && sameSpec(g2, c) {
+					return g2, nil
+				}
+			}
+			return nil, fmt.Errorf("%w: %v", ErrConflict, err)
+		}
 		return nil, err
 	}
 	if err := addEvent(ctx, tx, g.ID, "transition", map[string]any{"from": "", "to": "proposed", "actor": c.CreatedBy}); err != nil {

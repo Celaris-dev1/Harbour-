@@ -56,6 +56,8 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 		code = 409
 	} else if errors.Is(err, store.ErrNotFound) {
 		code = 404
+	} else if errors.Is(err, store.ErrConflict) {
+		code = 409
 	}
 	writeJSON(w, code, map[string]string{"error": err.Error()})
 }
