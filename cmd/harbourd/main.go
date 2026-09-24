@@ -16,6 +16,7 @@ import (
 
 	"github.com/Celaris-dev1/Harbour-/internal/api"
 	"github.com/Celaris-dev1/Harbour-/internal/demo"
+	"github.com/Celaris-dev1/Harbour-/internal/gatetool"
 	"github.com/Celaris-dev1/Harbour-/internal/ledger"
 	"github.com/Celaris-dev1/Harbour-/internal/registry"
 	"github.com/Celaris-dev1/Harbour-/internal/store"
@@ -49,6 +50,7 @@ func main() {
 	defer st.Close()
 	reg := registry.New()
 	demo.Register(reg, *dir)
+	reg.AddTool(&gatetool.Tool{}) // gate.verify: runs `gate run --format json` as an effect
 	wclient := warrant.FromEnv()
 	if wclient != nil {
 		slog.Info("warrant integration enabled", "url", os.Getenv("WARRANT_URL"))

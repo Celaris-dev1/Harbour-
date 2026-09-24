@@ -4,20 +4,26 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"os"
 	"reflect"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/Celaris-dev1/Harbour-/internal/fsm"
 	"github.com/Celaris-dev1/Harbour-/internal/ledger"
+	"github.com/Celaris-dev1/Harbour-/internal/receipt"
 	"github.com/Celaris-dev1/Harbour-/internal/registry"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -260,7 +266,66 @@ func (s *Store) Create(ctx context.Context, c CreateGoal) (*Goal, error) {
 
 func (s *Store) record(ctx context.Context, g *Goal, worker, typ string, payload map[string]any) {
 	payload["goal_name"] = g.Name
-	_ = s.Ledger.Record(ctx, ledger.Record{Chain: "harbour", Type: typ, GoalID: g.ID, ActorChain: ActorChain(g.CreatedBy, g.Agent, worker), Payload: payload})
+	actors := ActorChain(g.CreatedBy, g.Agent, worker)
+	if typ == "harbour.effect.result" {
+		attachReceipt(ctx, g.ID, actors, payload)
+	}
+	_ = s.Ledger.Record(ctx, ledger.Record{Chain: "harbour", Type: typ, GoalID: g.ID, ActorChain: actors, Payload: payload})
+}
+
+// receiptSigner lazily loads (or generates) the Ed25519 key Harbour signs stack-receipt/v1
+// effect receipts with. HARBOUR_RECEIPT_KEY is a base64 32-byte seed; unset generates an
+// ephemeral per-process key.
+var (
+	receiptSignerOnce sync.Once
+	receiptSignerKey  receipt.Ed25519Signer
+)
+
+func receiptSigner() receipt.Ed25519Signer {
+	receiptSignerOnce.Do(func() {
+		if seed := os.Getenv("HARBOUR_RECEIPT_KEY"); seed != "" {
+			if b, err := base64.StdEncoding.DecodeString(seed); err == nil && len(b) == ed25519.SeedSize {
+				receiptSignerKey = receipt.Ed25519Signer{Key: ed25519.NewKeyFromSeed(b)}
+				return
+			}
+			log.Print("HARBOUR_RECEIPT_KEY: invalid, ignoring (want base64 32-byte seed)")
+		}
+		_, priv, _ := ed25519.GenerateKey(rand.Reader)
+		receiptSignerKey = receipt.Ed25519Signer{Key: priv}
+	})
+	return receiptSignerKey
+}
+
+// attachReceipt signs a stack-receipt/v1 envelope over an effect's result payload and sets
+// payload["receipt"], linking to a Warrant token id when one is present in the payload (e.g.
+// added by the caller as "token_id" or "warrant_token_id"). It never fails the caller.
+func attachReceipt(ctx context.Context, goalID string, actors []ledger.Actor, payload map[string]any) {
+	ph, err := receipt.PayloadHash(payload)
+	if err != nil {
+		log.Printf("receipt: payload_hash: %v", err)
+		return
+	}
+	racts := make([]receipt.Actor, len(actors))
+	for i, a := range actors {
+		racts[i] = receipt.Actor{Kind: a.Kind, ID: a.ID, Model: a.Model, ModelVersion: a.ModelVersion}
+	}
+	var links []receipt.Link
+	if tok, _ := payload["token_id"].(string); tok != "" {
+		links = append(links, receipt.Link{Product: "warrant", ID: tok})
+	}
+	if runID, _ := payload["gate_run_id"].(string); runID != "" {
+		links = append(links, receipt.Link{Product: "gate", ID: runID})
+	}
+	subject, _ := payload["effect_id"].(string)
+	env, err := receipt.Sign(ctx, receiptSigner(), receipt.Envelope{
+		Product: "harbour", Kind: "harbour.effect", GoalID: goalID, Actors: racts,
+		Subject: subject, PayloadHash: ph, Links: links,
+	})
+	if err != nil {
+		log.Printf("receipt: sign: %v", err)
+		return
+	}
+	payload["receipt"] = env
 }
 
 // Get looks up by ID or by name.
@@ -615,7 +680,20 @@ func (s *Store) CommitResult(ctx context.Context, id int64, status string, resul
 		return nil, err
 	}
 	if g, err := s.Get(ctx, e.GoalID); err == nil {
-		s.record(ctx, g, e.Worker, "harbour.effect.result", map[string]any{"effect_id": e.ID, "step": e.Step, "tool": e.Tool, "idem_key": e.Key, "status": status, "via": via, "error": errMsg})
+		payload := map[string]any{"effect_id": e.ID, "step": e.Step, "tool": e.Tool, "idem_key": e.Key, "status": status, "via": via, "error": errMsg}
+		// A composition tool (e.g. gate.verify) can report the id of another product's own
+		// record/receipt it produced, so this effect's stack-receipt links to it. Any tool may
+		// do this by returning {"...": ..., "linked_run_id": "..."} in its result; harmless if
+		// absent or unrecognised.
+		if status == "committed" && len(result) > 0 {
+			var linked struct {
+				RunID string `json:"linked_run_id"`
+			}
+			if json.Unmarshal(result, &linked) == nil && linked.RunID != "" {
+				payload["gate_run_id"] = linked.RunID
+			}
+		}
+		s.record(ctx, g, e.Worker, "harbour.effect.result", payload)
 	}
 	return e, nil
 }

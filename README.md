@@ -86,10 +86,25 @@ harbour CLI ──HTTP/SSE──> harbourd ── API (internal/api)
   Any node can serve it, and it supports `Last-Event-ID` / `?after=`.
 - **Registry**: implement `registry.Tool` (optionally `registry.Prober`) and
   `registry.Agent` (`Next`, `Verify`), then register them in `cmd/harbourd`. `internal/demo`
-  ships `echo`, `fs.append` (probe-able), and the `demo.writer` agent.
+  ships `echo`, `fs.append` (probe-able), and the `demo.writer` agent. `internal/gatetool`
+  ships `gate.verify`: an effect that runs Gate's own verification (`gate run --format json`,
+  the real `gate` binary — never imported as a library) on a repo/base/head and records Gate's
+  verdict; its stack-receipt links to Gate's own `gate.verdict` receipt for the same run (see
+  "Stack-receipts" below).
 - **Ledger**: emits `harbour.goal.transition`, `harbour.effect.intent` and
   `harbour.effect.result` records on chain `harbour`. The actor chain is always
   `[human creator, service harbourd/<worker>, agent]`.
+
+## Stack-receipts
+
+Every `harbour.effect.result` record also carries a signed `payload.receipt`: a
+`stack-receipt/v1` envelope (`internal/receipt`, self-contained, validated against Ledger's
+`docs/receipt-spec.md` conformance vectors copied into `testdata/receipts/`) over the effect's
+outcome, signed with an Ed25519 key (`HARBOUR_RECEIPT_KEY`, base64 seed; an ephemeral key is
+generated if unset). When the effect's args or result identify a Warrant token (`token_id`) or a
+Gate run this effect composed with (`gate.verify`'s `linked_run_id`), the receipt's `links`
+point at them, so `ledger incident` can verify the whole chain — who authorised (Warrant) → what
+ran (Harbour) → what verified it (Gate) — without trusting Ledger's storage alone.
 
 ## Tests
 
