@@ -1,0 +1,29 @@
+{
+  "version": "stack-receipt/v1",
+  "product": "gate",
+  "kind": "gate.verdict",
+  "goal_id": "goal-1",
+  "actor_chain": [
+    {
+      "kind": "human",
+      "id": "alice"
+    },
+    {
+      "kind": "agent",
+      "id": "gate-ci",
+      "model": "gate"
+    }
+  ],
+  "subject": "run-1",
+  "payload_hash": "a0c9313f4dfd2c469295fd96ed70f6ffe2a8b63c78ff8b028ba49672a969dc70",
+  "links": [
+    {
+      "product": "warrant",
+      "id": "tok-1",
+      "hash": "a0c9313f4dfd2c469295fd96ed70f6ffe2a8b63c78ff8b028ba49672a969dc70"
+    }
+  ],
+  "issued_at": "2026-01-01T00:00:00Z",
+  "signer_key_id": "ed25519:df5b205f12c47fae",
+  "signature": "LkG1KNMb0Gg11ah8wxa363n5XiLEzHfpa4+OpjWIQjRQzS5PDBoCYOG7ckgszZmTzNcANyS2Yl6JCNQ9E47vAA=="
+}

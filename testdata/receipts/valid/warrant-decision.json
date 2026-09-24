@@ -1,0 +1,22 @@
+{
+  "version": "stack-receipt/v1",
+  "product": "warrant",
+  "kind": "warrant.decision",
+  "goal_id": "goal-1",
+  "actor_chain": [
+    {
+      "kind": "human",
+      "id": "alice"
+    },
+    {
+      "kind": "agent",
+      "id": "gate-ci",
+      "model": "gate"
+    }
+  ],
+  "subject": "tok-1",
+  "payload_hash": "a0c9313f4dfd2c469295fd96ed70f6ffe2a8b63c78ff8b028ba49672a969dc70",
+  "issued_at": "2026-01-01T00:00:00Z",
+  "signer_key_id": "ed25519:df5b205f12c47fae",
+  "signature": "dmA5XbUodix/JgWB3zkxUuizZVOOCg4Y+TMN5ltYERmM5wi3r+QfMzi+eEgoWfKb5I5cwz+si8czL70UkkpIDA=="
+}
