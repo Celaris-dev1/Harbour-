@@ -91,19 +91,88 @@ DB tests skip without the variable. Each test uses its own schema. Crash coverag
   crash/resume cycles, stale-lease fencing, idempotent replay with reordered args,
   pause/resume/cancel, provenance, 4 concurrent workers × 8 goals with no double execution.
 
+## External goal IDs
+
+`submit` accepts a caller-supplied `id`. A resubmit with the same id and the
+same spec (name/agent/input/parent_id) is idempotent and returns the
+existing goal; a resubmit with a different spec is a 409. Ledger records
+already carried `goal_id` (the actor-chain recorder always sets it from the
+goal), so a caller-chosen id shows up there unchanged too.
+
+## Ledger durability
+
+Ledger writes go through `internal/ledger.Spool` (used automatically
+whenever `LEDGER_URL` is set): every record is fsync'd to a local file under
+`LEDGER_SPOOL_DIR` (default `./harbour-ledger-spool`) before `Record`
+returns, so a down or slow Ledger never blocks a caller or drops a write. A
+background goroutine retries delivery with backoff and survives process
+restarts by re-scanning the spool directory on start.
+
+## Warrant integration
+
+When `WARRANT_URL` is set, every effect is authorized against
+[Warrant](../Warrant)'s `POST /v1/authorize` before the tool runs, using the
+`warrant_token`/`warrant_svid` supplied with the goal at submit time
+(`harbour submit -warrant-token ... -warrant-svid ...`, or `HARBOUR_WARRANT_TOKEN`/
+`HARBOUR_WARRANT_SVID`). A deny leaves the effect's idempotency key untouched
+(the tool never runs) and pauses the goal with the reason; `harbour resume`
+after the operator fixes authority re-authorizes cleanly. See
+`internal/warrant` and `SECURITY.md`.
+
+## Provenance policy
+
+Only `operator`-sourced messages are `Trusted`. An agent can flag
+`registry.Action.RequiresApproval` on a tool call it derived from
+untrusted-sourced content (`registry.UntrustedInputPresent` is a ready-made
+check); the worker then records it as `needs_review` — via
+`store.RequestApproval`, using the exact same idempotency-key scheme as the
+executor — without ever invoking the tool, exactly like an in-doubt
+crash-recovered effect with no probe. This is opt-in per agent; see
+`SECURITY.md`'s threat model for what that does and doesn't cover.
+
+## Pluggable engine (governance layer)
+
+`internal/engine` defines the durability primitives Harbour's governance
+logic (idempotent effects, needs_review, Warrant gating, Ledger receipts) is
+expressed against, independent of the Postgres lease loop above: `Engine`
+(`ScheduleStep`, `Timer`, `Signal`/`AwaitSignal`) plus `Runtime`, which
+implements that governance purely in terms of `Engine`. Two implementations
+ship — `Postgres` (the default) and `Fake` (a from-scratch in-process
+engine) — and both pass the identical conformance suite in
+`internal/engine/conformance.go`. A `temporal` build tag documents why a
+closure-based `go.temporal.io/sdk` adapter isn't shipped (see
+`internal/engine/temporal.go`) even though the SDK itself downloads and
+builds cleanly. This is an additive demonstration layer; the production
+`harbourd` runtime above is unchanged.
+
+## End-to-end test
+
+`scripts/e2e.sh` builds real binaries (never `go run`) and drives
+submit→approve→effects→done, a real process crash→resume with no double
+execution, a probe-less crash→needs_review→resolve→done, and a Warrant
+deny→allow→resume, against Postgres (creating the `harbour` database and
+starting the local cluster if needed). It's also the last CI step.
+
 ## Built vs roadmap
 
-Built: single-node runtime (many workers/daemons may share one Postgres), everything above.
+Built: single-node runtime (many workers/daemons may share one Postgres),
+external goal ids, durable Ledger spooling, Warrant authorization, the
+provenance approval policy, the pluggable-engine governance layer, and
+everything above.
 
 Not yet built (from the spec's "fully built version"):
 - Fleet control plane: multi-node scheduling and placement, resource accounting, a
   single-pane UI across hundreds of agents.
-- Warrant integration: authority checks before effects, and current authority shown per goal.
+- Current-authority-per-goal display in the CLI/API (Warrant enforces it; there's no
+  UI surfacing it yet).
 - Incident-response UX that joins Harbour state with Ledger replay (the records are
   emitted, but there is no combined replay/roll-forward tool).
 - Retry policies and backoff for failed tools (a tool error currently fails the goal),
   per-goal timeouts, and scheduled (cron) goals from the `scheduler` source.
 - An LLM-backed agent. Only the deterministic demo agent ships.
-- AuthN/Z beyond one shared bearer token. Any token holder can post `operator` messages.
-- LISTEN/NOTIFY for attach (it polls every 300ms today). Ledger writes are
-  best-effort after the DB commit, with no outbox.
+- AuthN/Z beyond one shared bearer token for goal-level operator actions (any token
+  holder can post `operator` messages or resolve any `needs_review` effect); Warrant
+  is what gates individual effects.
+- LISTEN/NOTIFY for attach (it polls every 300ms today).
+- A real `temporal`-tagged Engine (see `internal/engine/temporal.go` for why, and
+  what shape it needs).
