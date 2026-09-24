@@ -100,8 +100,10 @@ harbour CLI ──HTTP/SSE──> harbourd ── API (internal/api)
 Every `harbour.effect.result` record also carries a signed `payload.receipt`: a
 `stack-receipt/v1` envelope (`internal/receipt`, self-contained, validated against Ledger's
 `docs/receipt-spec.md` conformance vectors copied into `testdata/receipts/`) over the effect's
-outcome, signed with an Ed25519 key (`HARBOUR_RECEIPT_KEY`, base64 seed; an ephemeral key is
-generated if unset). When the effect's args or result identify a Warrant token (`token_id`) or a
+outcome, signed with a persistent Ed25519 key (`HARBOUR_RECEIPT_KEY`, base64 seed, or a key file
+at `HARBOUR_RECEIPT_KEY_FILE`/the user config dir, created on first use, so `signer_key_id` stays
+stable across restarts; see `harbourd keys show`). When the effect's args or result identify a
+Warrant token (`token_id`) or a
 Gate run this effect composed with (`gate.verify`'s `linked_run_id`), the receipt's `links`
 point at them, so `ledger incident` can verify the whole chain — who authorised (Warrant) → what
 ran (Harbour) → what verified it (Gate) — without trusting Ledger's storage alone.
