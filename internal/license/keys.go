@@ -24,11 +24,9 @@ func decodeStd(s string) ([]byte, error) { return base64.StdEncoding.DecodeStrin
 // The private key never goes in this repo. Only the public key does.
 // ---------------------------------------------------------------------------------------
 
-// prodPublicKeyB64 is a PLACEHOLDER. It decodes to 32 zero bytes, which can never verify a
-// real signature, so shipping this unchanged simply means "no production licenses verify
-// yet" rather than a security hole. Replace it with your real base64 (std encoding)
-// Ed25519 public key from .
-const prodPublicKeyB64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" // PLACEHOLDER -- replace before release
+// prodPublicKeyB64 is Prolu's production Ed25519 public key (std base64). The matching
+// private key lives only in the owner's Google Apps Script properties.
+const prodPublicKeyB64 = "UCXEclvh87t1apSNsbff7yYy8AyY8h++HNWSVfYseE4=" // Prolu production key (signed by the Grey autopay Apps Script)
 
 // devPublicKeyB64 is a fixed development key pair used only by this repo's own tests, so
 // tests don't need to mutate the trusted key list. Its private half is devPrivateKeyB64
