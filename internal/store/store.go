@@ -243,7 +243,10 @@ func (s *Store) Create(ctx context.Context, c CreateGoal) (*Goal, error) {
 					return g2, nil
 				}
 			}
-			return nil, fmt.Errorf("%w: %v", ErrConflict, err)
+			if pgErr.ConstraintName == "goals_name_key" {
+				return nil, fmt.Errorf("%w: name %q already in use", ErrConflict, c.Name)
+			}
+			return nil, fmt.Errorf("%w: goal_id %q already exists with a different spec", ErrConflict, id)
 		}
 		return nil, err
 	}
