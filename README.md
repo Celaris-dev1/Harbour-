@@ -255,7 +255,10 @@ do. Never ship a `licensedev` build.
 
 ## License
 
-Apache License 2.0; see [LICENSE](LICENSE). Self-hosted: you run Harbour on your own
-infrastructure. No hosted service is required and none is contacted. (This is the source
-license for the Harbour codebase itself; see PRICING.md and LICENSING above for the paid
-Enterprise feature key, a separate, additive mechanism, not the code license.)
+Harbour is source-available under the [Functional Source License 1.1, Apache 2.0 future license](LICENSE.md) (FSL-1.1-ALv2).
+
+- You can use, modify and self-host it for free, including inside your company and for commercial work.
+- You can't offer it, or a derivative of it, as a competing product or service.
+- Each release becomes Apache License 2.0 two years after it is published.
+
+Enterprise features need a license key; see [PRICING.md](PRICING.md) and the LICENSING section above. Self-hosted: you run Harbour on your own infrastructure, and no hosted service is contacted.
