@@ -18,6 +18,7 @@ import (
 	"github.com/Celaris-dev1/Harbour-/internal/demo"
 	"github.com/Celaris-dev1/Harbour-/internal/gatetool"
 	"github.com/Celaris-dev1/Harbour-/internal/ledger"
+	"github.com/Celaris-dev1/Harbour-/internal/license"
 	"github.com/Celaris-dev1/Harbour-/internal/registry"
 	"github.com/Celaris-dev1/Harbour-/internal/store"
 	"github.com/Celaris-dev1/Harbour-/internal/warrant"
@@ -39,6 +40,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "license" {
+		if err := cmdLicense(os.Args[2:]); err != nil {
+			slog.Error("license", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	addr := flag.String("addr", env("HARBOUR_ADDR", ":8450"), "listen address")
 	dbURL := flag.String("db", env("HARBOUR_DATABASE_URL", "postgres://postgres:postgres@localhost:5432/harbour"), "postgres url")
 	workers := flag.Int("workers", 2, "worker goroutines (0 = API only)")
@@ -46,6 +54,16 @@ func main() {
 	ttl := flag.Duration("lease-ttl", 10*time.Second, "worker lease TTL")
 	dir := flag.String("demo-dir", env("HARBOUR_DEMO_DIR", "./harbour-data"), "directory for demo fs.append tool")
 	flag.Parse()
+
+	// freeWorkerCap is the default worker pool (the out-of-box single-node deployment);
+	// running with more requires an Enterprise license (multi-worker / HA scale-out).
+	const freeWorkerCap = 2
+	if *workers > freeWorkerCap {
+		if err := license.Require(license.FeatureMultiWorker); err != nil {
+			slog.Error("license", "err", err)
+			os.Exit(1)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

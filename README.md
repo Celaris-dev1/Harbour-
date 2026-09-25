@@ -210,7 +210,52 @@ Not yet built (from the spec's "fully built version"):
 - A real `temporal`-tagged Engine (see `internal/engine/temporal.go` for why, and
   what shape it needs).
 
+## LICENSING (Enterprise add-ons)
+
+Harbour is open core. The single-node runtime — durable step engine, HTTP API, Ledger
+spooling, Warrant authorization, the demo agent and every tool — is free and always will be;
+see [PRICING.md](PRICING.md). Running many `harbourd` daemons against one Postgres (each at
+the default worker cap) is core too. One scale-out feature requires a paid, offline license
+key: `HARBOUR_LICENSE` (a token) or `HARBOUR_LICENSE_FILE` (a path). Verification is
+Ed25519-signature checking against a vendor public key compiled into the binary
+(`internal/license`) — no network call, no phone-home, works air-gapped.
+
+Gated feature:
+
+- **Scale-out worker pools.** `harbourd -workers N` with `N` above the free cap of 2 worker
+  goroutines per process. Running at or under the cap — including many daemons sharing one
+  Postgres for HA — stays free.
+
+States: **none** (no license — core works fully, gated features are off), **valid**,
+**grace** (up to 14 days past expiry — gated features keep working with a loud warning),
+**expired** (gated features off). An invalid or tampered token is treated as no license,
+with a warning — `harbourd` never fails a build over a bad token, and never deletes or hides
+data when a feature turns off (it refuses to start with a gated `-workers` value instead).
+
+- `harbourd license show [--json]` / `harbourd license verify <token|file>` — inspect the
+  current or a given license, entirely offline.
+
+**Issuing licenses** (vendor only — needs the private signing key, which must never be
+committed):
+
+```
+go run -tags licensegen ./tools/licensegen keygen --out priv.key      # keep priv.key OFFLINE
+go run -tags licensegen ./tools/licensegen issue --key priv.key \
+    --customer "Acme Inc" --edition enterprise --seats 10 --days 365 > license.tok
+```
+
+`tools/licensegen` is a separate `main` package behind the `licensegen` build tag, so
+`go build ./...` and the released `harbourd` binary never include it. After generating a
+real keypair, put its **public** key into `internal/license/keys.go`'s `prodPublicKeyB64`
+and cut a release; the private key stays with the vendor, offline, always.
+
+The repo also carries a public **dev** keypair (`licensegen issue --key dev`) for tests.
+Release builds never trust it; only binaries built with `-tags licensedev` (the e2e harness)
+do. Never ship a `licensedev` build.
+
 ## License
 
 Apache License 2.0; see [LICENSE](LICENSE). Self-hosted: you run Harbour on your own
-infrastructure. No hosted service is required and none is contacted.
+infrastructure. No hosted service is required and none is contacted. (This is the source
+license for the Harbour codebase itself; see PRICING.md and LICENSING above for the paid
+Enterprise feature key, a separate, additive mechanism, not the code license.)
