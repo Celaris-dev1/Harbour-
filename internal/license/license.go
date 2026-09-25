@@ -226,8 +226,10 @@ func SeatWarning(st *Status, active int) string {
 
 // Encode/Decode helpers shared with tools/licensegen and tests.
 
-func b64(b []byte) string            { return base64.RawURLEncoding.EncodeToString(b) }
-func unb64(s string) ([]byte, error) { return base64.RawURLEncoding.DecodeString(s) }
+func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+// Strict rejects non-zero trailing bits, so a token has exactly one valid spelling.
+func unb64(s string) ([]byte, error) { return base64.RawURLEncoding.Strict().DecodeString(s) }
 
 // canonicalJSON is the exact bytes that get signed: json.Marshal of the fixed-order
 // License struct (no maps involved, so Go's struct field order is deterministic).
