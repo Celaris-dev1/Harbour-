@@ -60,7 +60,10 @@ fi
 
 # ---------- Build ----------
 log "building binaries"
-go build -o "$BIN/" ./cmd/...
+# -tags licensedev: lets e2e exercise Enterprise-gated features (e.g. multi-worker scale-out)
+# with a throwaway license signed by the repo's public dev key (see internal/license). A
+# plain `go build` (no tags) never trusts that key.
+go build -tags licensedev -o "$BIN/" ./cmd/...
 
 harbour() { HARBOUR_URL="$1" "$BIN/harbour" "${@:2}"; }
 
