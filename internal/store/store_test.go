@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/Celaris-dev1/Harbour-/internal/ledger"
@@ -120,6 +121,31 @@ func TestCreateConflictingSpecSameGoalID(t *testing.T) {
 	c3.Input = json.RawMessage(`{"different":true}`)
 	if _, err := st.Create(ctx, c3); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected ErrConflict for different input, got %v", err)
+	}
+}
+
+// TestCreateDuplicateNameCleanError covers submitting a second goal with a name
+// that's already taken (no caller-supplied ID, so the two goals get distinct
+// generated IDs and only the `goals_name_key` unique constraint fires). The
+// resulting error must be a clean, user-facing message, not a raw Postgres
+// error with an embedded SQLSTATE code.
+func TestCreateDuplicateNameCleanError(t *testing.T) {
+	st := open(t)
+	ctx := context.Background()
+	c := CreateGoal{Name: "dupname", Agent: "a", Input: json.RawMessage(`{}`), CreatedBy: "alice"}
+	if _, err := st.Create(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	_, err := st.Create(ctx, c)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict, got %v", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "SQLSTATE") || strings.Contains(msg, "ERROR:") {
+		t.Fatalf("error message leaks raw postgres error: %q", msg)
+	}
+	if !strings.Contains(msg, "dupname") {
+		t.Fatalf("expected error to name the conflicting name, got %q", msg)
 	}
 }
 
